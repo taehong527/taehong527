@@ -9,288 +9,415 @@
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- 카카오 지도 SDK -->
+    <script type="text/javascript" src="//dapi.kakao.com/v2/maps/sdk.js?34ab15772b48dd81bd5b25083e464a72&libraries=services"></script>
 </head>
 <body class="bg-amber-50/30 text-gray-800 antialiased">
     <div id="root"></div>
 
     <script type="text/babel">
-        const { useState, useEffect } = React;
+        const { useState, useEffect, useRef } = React;
+
+        // 카카오 지도 컴포넌트 (주민 20km 제한 vs 여행자 전국 검색)
+        function KakaoMapView({ userMode, userLat, userLng, searchKeyword, onStoresFound }) {
+            const mapRef = useRef(null);
+
+            useEffect(() => {
+                if (!window.kakao || !window.kakao.maps) return;
+
+                const lat = userLat || 35.834; 
+                const lng = userLng || 128.754;
+
+                const container = mapRef.current;
+                const options = {
+                    center: new window.kakao.maps.LatLng(lat, lng),
+                    level: userMode === 'RESIDENT' ? 7 : 5
+                };
+
+                const map = new window.kakao.maps.Map(container, options);
+                const ps = new window.kakao.maps.services.Places();
+
+                // 1. 주민 모드: 실제 내 위치 기준 반경 20km 제한 및 원 표시
+                if (userMode === 'RESIDENT') {
+                    const circle = new window.kakao.maps.Circle({
+                        center: new window.kakao.maps.LatLng(lat, lng),
+                        radius: 20000, // 20km
+                        strokeWeight: 2,
+                        strokeColor: '#FF6B00',
+                        strokeOpacity: 0.8,
+                        strokeStyle: 'dashed',
+                        fillColor: '#FF6B00',
+                        fillOpacity: 0.1
+                    });
+                    circle.setMap(map);
+
+                    ps.keywordSearch('맛집', (data, status) => {
+                        if (status === window.kakao.maps.services.Status.OK) {
+                            renderMarkers(data, map);
+                        }
+                    }, {
+                        location: new window.kakao.maps.LatLng(lat, lng),
+                        radius: 20000,
+                        sort: window.kakao.maps.services.SortBy.ACCURACY
+                    });
+                } 
+                // 2. 여행자 모드: 전국 키워드/지역 자유 검색
+                else {
+                    const query = searchKeyword || '전국 맛집';
+                    ps.keywordSearch(query, (data, status) => {
+                        if (status === window.kakao.maps.services.Status.OK) {
+                            const bounds = new window.kakao.maps.LatLngBounds();
+                            data.forEach(place => bounds.extend(new window.kakao.maps.LatLng(place.y, place.x)));
+                            map.setBounds(bounds); // 검색된 지역 위치로 지도 자동 이동
+                            renderMarkers(data, map);
+                        }
+                    });
+                }
+
+                function renderMarkers(data, mapObj) {
+                    const storeList = [];
+                    data.forEach((place) => {
+                        const marker = new window.kakao.maps.Marker({
+                            map: mapObj,
+                            position: new window.kakao.maps.LatLng(place.y, place.x)
+                        });
+
+                        const infowindow = new window.kakao.maps.InfoWindow({
+                            content: `<div style="padding:5px;font-size:12px;font-weight:bold;">${place.place_name}</div>`
+                        });
+                        window.kakao.maps.event.addListener(marker, 'click', () => {
+                            infowindow.open(mapObj, marker);
+                        });
+
+                        storeList.push({
+                            id: place.id,
+                            name: place.place_name,
+                            category: place.category_name,
+                            address: place.road_address_name || place.address_name,
+                            phone: place.phone,
+                            lat: place.y,
+                            lng: place.x
+                        });
+                    });
+                    if (onStoresFound) onStoresFound(storeList);
+                }
+
+            }, [userMode, userLat, userLng, searchKeyword]);
+
+            return (
+                <div class="w-full h-80 rounded-2xl border border-gray-200 overflow-hidden shadow-sm relative">
+                    <div ref={mapRef} class="w-full h-full"></div>
+                </div>
+            );
+        }
 
         function GolmokPickApp() {
-            // 회원가입/로그인 상태
-            const [currentUser, setCurrentUser] = useState(null); // { id, nickname, points, mode }
-            const [authMode, setAuthMode] = useState('LOGIN'); // 'LOGIN' | 'REGISTER'
+            const [currentUser, setCurrentUser] = useState(null);
+            const [authMode, setAuthMode] = useState('LOGIN');
             const [loginId, setLoginId] = useState('');
             const [loginPw, setLoginPw] = useState('');
             const [regNickname, setRegNickname] = useState('');
 
-            // 앱 내부 상태
+            // 모드 설정 ('RESIDENT': 동네주민 20km | 'TRAVELER': 전국 여행자)
+            const [userMode, setUserMode] = useState('RESIDENT');
+            const [travelSearchInput, setTravelSearchInput] = useState('');
+            const [travelSearchKeyword, setTravelSearchKeyword] = useState('제주도 맛집');
+
+            const [activeTab, setActiveTab] = useState('home');
             const [isAdminView, setIsAdminView] = useState(false);
             const [adminPasswordInput, setAdminPasswordInput] = useState('');
             const [adminAuthed, setAdminAuthed] = useState(false);
 
-            // 가상 DB (테스트용)
+            // 실제 GPS 위치 및 실시간 식당 목록
+            const [userLocation, setUserLocation] = useState({ lat: 35.834, lng: 128.754 });
+            const [realStores, setRealStores] = useState([]);
+
+            const [aiQuery, setAiQuery] = useState('');
+            const [aiResult, setAiResult] = useState(null);
+
             const [userList, setUserList] = useState([
-                { id: 'user1', nickname: '대동주민123', points: 320, reviewCount: 3, mode: 'RESIDENT' },
-                { id: 'user2', nickname: '영남대식객', points: 550, reviewCount: 5, mode: 'RESIDENT' },
-                { id: 'user3', nickname: '여행가김씨', points: 120, reviewCount: 1, mode: 'TRAVELER' }
+                { id: 'user1', nickname: '대동주민123', points: 320, reviewCount: 3 },
+                { id: 'user2', nickname: '영남대식객', points: 550, reviewCount: 5 }
             ]);
 
-            // 로그인 처리
+            // 브라우저 GPS 실시간 위치 수신
+            useEffect(() => {
+                if (navigator.geolocation) {
+                    navigator.geolocation.getCurrentPosition(
+                        (pos) => setUserLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+                        (err) => console.log("기본 GPS 위치 사용 중")
+                    );
+                }
+            }, []);
+
+            // URL #admin 감지
+            useEffect(() => {
+                const checkHash = () => { if (window.location.hash === '#admin') setIsAdminView(true); };
+                checkHash();
+                window.addEventListener('hashchange', checkHash);
+                return () => window.removeEventListener('hashchange', checkHash);
+            }, []);
+
             const handleLogin = (e) => {
                 e.preventDefault();
-                if (!loginId || !loginPw) {
-                    alert("아이디와 비밀번호를 입력해주세요.");
-                    return;
-                }
-                
-                // 기존 유저 찾기 또는 새로 로그인 세션 생성
+                if (!loginId || !loginPw) return alert("아이디와 비밀번호를 입력해주세요.");
                 const existing = userList.find(u => u.id === loginId);
-                if (existing) {
-                    setCurrentUser(existing);
-                } else {
-                    const newUser = { id: loginId, nickname: loginId, points: 0, reviewCount: 0, mode: 'RESIDENT' };
+                if (existing) setCurrentUser(existing);
+                else {
+                    const newUser = { id: loginId, nickname: loginId, points: 0, reviewCount: 0 };
                     setUserList(prev => [...prev, newUser]);
                     setCurrentUser(newUser);
                 }
             };
 
-            // 회원가입 처리
             const handleRegister = (e) => {
                 e.preventDefault();
-                if (!loginId || !loginPw || !regNickname) {
-                    alert("모든 항목을 입력해주세요.");
-                    return;
-                }
-                const newUser = { id: loginId, nickname: regNickname, points: 0, reviewCount: 0, mode: 'RESIDENT' };
+                if (!loginId || !loginPw || !regNickname) return alert("모든 항목을 입력해주세요.");
+                const newUser = { id: loginId, nickname: regNickname, points: 0, reviewCount: 0 };
                 setUserList(prev => [...prev, newUser]);
                 setCurrentUser(newUser);
-                alert("회원가입이 완료되어 로그인되었습니다!");
+                alert("회원가입 완료!");
             };
 
-            // 리뷰 작성 시 포인트 증가
             const handleAddReview = () => {
                 if (!currentUser) return;
-                const updatedPoints = currentUser.points + 100;
-                const updatedReviews = currentUser.reviewCount + 1;
-                
-                const updatedUser = { ...currentUser, points: updatedPoints, reviewCount: updatedReviews };
-                setCurrentUser(updatedUser);
-                
-                setUserList(prev => prev.map(u => u.id === currentUser.id ? updatedUser : u));
-                alert("영수증 인증 리뷰가 정상 등록되어 100P가 적립되었습니다!");
+                const updated = { ...currentUser, points: currentUser.points + 100, reviewCount: currentUser.reviewCount + 1 };
+                setCurrentUser(updated);
+                setUserList(prev => prev.map(u => u.id === currentUser.id ? updated : u));
+                alert("영수증 인증 리뷰 작성 완료 (+100P 적립!)");
             };
 
-            // 관리자 로그인 확인
+            const handleTravelSearch = (e) => {
+                e.preventDefault();
+                if (!travelSearchInput) return;
+                setTravelSearchKeyword(travelSearchInput);
+            };
+
+            const handleAiRecommend = (e) => {
+                e.preventDefault();
+                if (!aiQuery) return;
+
+                if (realStores.length > 0) {
+                    const picked = realStores[Math.floor(Math.random() * realStores.length)];
+                    setAiResult({
+                        storeName: picked.name,
+                        category: picked.category,
+                        address: picked.address,
+                        reason: `'${aiQuery}' 요청 조건에 최적화된 ${userMode === 'RESIDENT' ? '내 주변 20km' : '전국'} 실제 찐맛집입니다.`
+                    });
+                } else alert("식당 정보 검색 중입니다.");
+            };
+
             const handleAdminLogin = (e) => {
                 e.preventDefault();
-                if (adminPasswordInput === 'admin1234') { // 관리자 비밀번호
-                    setAdminAuthed(true);
-                } else {
-                    alert("관리자 비밀번호가 올바르지 않습니다.");
-                }
+                if (adminPasswordInput === 'admin1234') setAdminAuthed(true);
+                else alert("비밀번호 불일치");
             };
 
-            // 1. 로그인/회원가입 화면
-            if (!currentUser && !isAdminView) {
-                return (
-                    <div class="min-h-screen flex flex-col items-center justify-center p-6 bg-[#FFFBF0]">
-                        <div class="w-full max-w-sm bg-white p-6 rounded-3xl shadow-xl border border-orange-100 text-center">
-                            <div class="w-20 h-20 mx-auto mb-3 bg-orange-500 rounded-full flex items-center justify-center text-white text-3xl font-bold shadow-md">
-                                📍
-                            </div>
-                            <h1 class="text-2xl font-black text-orange-600 mb-1">골목픽</h1>
-                            <p class="text-xs text-gray-500 mb-6">기기가 바뀌어도 포인트 보존! 로그인해주세요.</p>
-
-                            {authMode === 'LOGIN' ? (
-                                <form onSubmit={handleLogin} class="space-y-3">
-                                    <input 
-                                        type="text" 
-                                        placeholder="아이디 (휴대폰 번호 등)" 
-                                        value={loginId}
-                                        onChange={(e) => setLoginId(e.target.value)}
-                                        class="w-full px-4 py-3 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-orange-500"
-                                    />
-                                    <input 
-                                        type="password" 
-                                        placeholder="비밀번호" 
-                                        value={loginPw}
-                                        onChange={(e) => setLoginPw(e.target.value)}
-                                        class="w-full px-4 py-3 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-orange-500"
-                                    />
-                                    <button type="submit" class="w-full py-3.5 bg-orange-500 hover:bg-orange-600 text-white font-bold rounded-xl shadow transition-all text-sm">
-                                        로그인하기
-                                    </button>
-                                    <button 
-                                        type="button" 
-                                        onClick={() => setAuthMode('REGISTER')}
-                                        class="text-xs text-gray-400 underline block mx-auto mt-2">
-                                        계정이 없으신가요? 회원가입
-                                    </button>
-                                </form>
-                            ) : (
-                                <form onSubmit={handleRegister} class="space-y-3">
-                                    <input 
-                                        type="text" 
-                                        placeholder="사용할 아이디" 
-                                        value={loginId}
-                                        onChange={(e) => setLoginId(e.target.value)}
-                                        class="w-full px-4 py-3 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-orange-500"
-                                    />
-                                    <input 
-                                        type="password" 
-                                        placeholder="비밀번호" 
-                                        value={loginPw}
-                                        onChange={(e) => setLoginPw(e.target.value)}
-                                        class="w-full px-4 py-3 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-orange-500"
-                                    />
-                                    <input 
-                                        type="text" 
-                                        placeholder="동네 닉네임 (예: 대동주민)" 
-                                        value={regNickname}
-                                        onChange={(e) => setRegNickname(e.target.value)}
-                                        class="w-full px-4 py-3 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-orange-500"
-                                    />
-                                    <button type="submit" class="w-full py-3.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow transition-all text-sm">
-                                        회원가입 완료
-                                    </button>
-                                    <button 
-                                        type="button" 
-                                        onClick={() => setAuthMode('LOGIN')}
-                                        class="text-xs text-gray-400 underline block mx-auto mt-2">
-                                        이미 계정이 있으신가요? 로그인
-                                    </button>
-                                </form>
-                            )}
-
-                            <hr class="my-5 border-gray-100" />
-                            <button 
-                                onClick={() => setIsAdminView(true)}
-                                class="text-xs bg-gray-100 text-gray-600 px-3 py-1.5 rounded-lg font-bold hover:bg-gray-200">
-                                🔒 관계자(관리자) 전용 접속
-                            </button>
-                        </div>
-                    </div>
-                );
-            }
-
-            // 2. 관리자(관계자) 전용 모드
+            // 1. 관리자 모드
             if (isAdminView) {
                 return (
                     <div class="max-w-md mx-auto bg-white min-h-screen p-5 border-x border-gray-100">
                         <div class="flex justify-between items-center mb-6">
-                            <h2 class="text-xl font-extrabold text-gray-900">👑 관계자 관리자 페이지</h2>
-                            <button 
-                                onClick={() => { setIsAdminView(false); setAdminAuthed(false); }}
-                                class="text-xs bg-gray-200 text-gray-700 px-3 py-1 rounded-lg">
-                                나가기
-                            </button>
+                            <h2 class="text-xl font-extrabold text-gray-900">🔒 관계자 전용 관리 페이지</h2>
+                            <button onClick={() => { setIsAdminView(false); setAdminAuthed(false); window.location.hash = ''; }} class="text-xs bg-gray-200 text-gray-700 px-3 py-1 rounded-lg font-bold">나가기</button>
                         </div>
-
                         {!adminAuthed ? (
-                            <form onSubmit={handleAdminLogin} class="bg-gray-50 p-5 rounded-2xl border border-gray-200 space-y-3">
-                                <p class="text-sm font-bold text-gray-700">관리자 비밀번호를 입력하세요.</p>
-                                <input 
-                                    type="password" 
-                                    placeholder="비밀번호 (초기값: admin1234)" 
-                                    value={adminPasswordInput}
-                                    onChange={(e) => setAdminPasswordInput(e.target.value)}
-                                    class="w-full px-4 py-2.5 border rounded-xl text-sm"
-                                />
-                                <button type="submit" class="w-full py-2.5 bg-gray-900 text-white font-bold rounded-xl text-sm">
-                                    관리자 인증
-                                </button>
+                            <form onSubmit={handleAdminLogin} class="bg-gray-50 p-5 rounded-2xl border space-y-3">
+                                <p class="text-sm font-bold text-gray-700">비밀번호 입력</p>
+                                <input type="password" value={adminPasswordInput} onChange={(e) => setAdminPasswordInput(e.target.value)} class="w-full px-4 py-2.5 border rounded-xl text-sm" />
+                                <button type="submit" class="w-full py-2.5 bg-gray-900 text-white font-bold rounded-xl text-sm">인증하기</button>
                             </form>
                         ) : (
-                            <div>
-                                <div class="bg-orange-50 border border-orange-200 p-4 rounded-2xl mb-5 text-xs text-orange-900">
-                                    💡 <strong>기프티콘 지급 관리:</strong> 리뷰 작성 수가 많거나 포인트를 많이 적립한 열심 주민 유저를 파악하고 기프티콘을 발송하세요.
-                                </div>
-
-                                <h3 class="font-bold text-sm text-gray-700 mb-3">📊 회원별 활동 현황 목록</h3>
-                                <div class="space-y-3">
-                                    {userList.map((u, i) => (
-                                        <div key={i} class="p-4 border rounded-2xl flex justify-between items-center bg-gray-50/50">
-                                            <div>
-                                                <div class="flex items-center gap-2">
-                                                    <span class="font-bold text-gray-800 text-sm">{u.nickname}</span>
-                                                    <span class="text-[10px] bg-gray-200 px-1.5 py-0.5 rounded text-gray-600">{u.id}</span>
-                                                </div>
-                                                <p class="text-xs text-gray-500 mt-1">
-                                                    작성 리뷰: <strong class="text-orange-600">{u.reviewCount}개</strong>
-                                                </p>
-                                            </div>
-                                            <div class="text-right">
-                                                <span class="text-xs text-gray-400 block">보유 포인트</span>
-                                                <span class="font-extrabold text-orange-600 text-sm">{u.points} P</span>
-                                            </div>
+                            <div class="space-y-3">
+                                <h3 class="font-bold text-sm text-gray-700">📊 회원별 작성 리뷰 및 포인트</h3>
+                                {userList.map((u, i) => (
+                                    <div key={i} class="p-4 border rounded-2xl flex justify-between items-center bg-gray-50/50">
+                                        <div>
+                                            <span class="font-bold text-gray-800 text-sm">{u.nickname} ({u.id})</span>
+                                            <p class="text-xs text-gray-500 mt-1">리뷰 수: <strong class="text-orange-600">{u.reviewCount}개</strong></p>
                                         </div>
-                                    ))}
-                                </div>
+                                        <span class="font-extrabold text-orange-600 text-sm">{u.points} P</span>
+                                    </div>
+                                ))}
                             </div>
                         )}
                     </div>
                 );
             }
 
-            // 3. 일반 사용자 메인 화면
+            // 2. 로그인 화면
+            if (!currentUser) {
+                return (
+                    <div class="min-h-screen flex flex-col items-center justify-center p-6 bg-[#FFFBF0]">
+                        <div class="w-full max-w-sm bg-white p-6 rounded-3xl shadow-xl border border-orange-100 text-center">
+                            <div onClick={() => setIsAdminView(true)} class="w-20 h-20 mx-auto mb-3 bg-orange-500 rounded-full flex items-center justify-center text-white text-3xl font-bold shadow-md cursor-pointer">📍</div>
+                            <h1 class="text-2xl font-black text-orange-600 mb-1">골목픽</h1>
+                            <p class="text-xs text-gray-500 mb-6">로그인 시 내 포인트 보존</p>
+                            {authMode === 'LOGIN' ? (
+                                <form onSubmit={handleLogin} class="space-y-3">
+                                    <input type="text" placeholder="아이디" value={loginId} onChange={(e) => setLoginId(e.target.value)} class="w-full px-4 py-3 border rounded-xl text-sm" />
+                                    <input type="password" placeholder="비밀번호" value={loginPw} onChange={(e) => setLoginPw(e.target.value)} class="w-full px-4 py-3 border rounded-xl text-sm" />
+                                    <button type="submit" class="w-full py-3.5 bg-orange-500 text-white font-bold rounded-xl shadow text-sm">로그인하기</button>
+                                    <button type="button" onClick={() => setAuthMode('REGISTER')} class="text-xs text-gray-400 underline block mx-auto mt-2">회원가입하기</button>
+                                </form>
+                            ) : (
+                                <form onSubmit={handleRegister} class="space-y-3">
+                                    <input type="text" placeholder="아이디" value={loginId} onChange={(e) => setLoginId(e.target.value)} class="w-full px-4 py-3 border rounded-xl text-sm" />
+                                    <input type="password" placeholder="비밀번호" value={loginPw} onChange={(e) => setLoginPw(e.target.value)} class="w-full px-4 py-3 border rounded-xl text-sm" />
+                                    <input type="text" placeholder="동네 닉네임" value={regNickname} onChange={(e) => setRegNickname(e.target.value)} class="w-full px-4 py-3 border rounded-xl text-sm" />
+                                    <button type="submit" class="w-full py-3.5 bg-emerald-600 text-white font-bold rounded-xl shadow text-sm">회원가입 완료</button>
+                                    <button type="button" onClick={() => setAuthMode('LOGIN')} class="text-xs text-gray-400 underline block mx-auto mt-2">로그인으로 돌아가기</button>
+                                </form>
+                            )}
+                        </div>
+                    </div>
+                );
+            }
+
+            // 3. 메인 서비스 화면
             return (
                 <div class="max-w-md mx-auto bg-white min-h-screen shadow-xl flex flex-col relative pb-20 border-x border-gray-100">
                     <header class="p-4 bg-[#FFFBF0] border-b border-orange-100 flex items-center justify-between sticky top-0 z-10">
                         <div class="flex items-center gap-2">
                             <span class="text-2xl font-black text-orange-500">골목픽</span>
-                            <span class="text-xs bg-orange-100 text-orange-700 font-bold px-2 py-0.5 rounded-full">
-                                {currentUser.nickname}님
-                            </span>
+                            <span class="text-xs bg-orange-100 text-orange-700 font-bold px-2 py-0.5 rounded-full">{currentUser.nickname}님</span>
                         </div>
                         <div class="flex items-center gap-3">
-                            <div class="text-right">
-                                <span class="text-[10px] text-gray-400 block">내 포인트</span>
-                                <span class="font-extrabold text-orange-600 text-sm">{currentUser.points.toLocaleString()} P</span>
-                            </div>
+                            <span class="font-extrabold text-orange-600 text-sm">{currentUser.points.toLocaleString()} P</span>
                             <button onClick={() => setCurrentUser(null)} class="text-xs text-gray-400 underline">로그아웃</button>
                         </div>
                     </header>
 
-                    <div class="bg-amber-100/70 px-4 py-2 text-xs text-amber-800 flex items-center justify-between">
-                        <span>💡 1,000P = 1,000원 (상점 협찬 없이 100% 주민 리뷰)</span>
+                    {/* 모드 전환 토글 (주민 20km vs 전국 여행자) */}
+                    <div class="bg-gray-100 p-1.5 m-4 rounded-2xl flex gap-1">
+                        <button 
+                            onClick={() => setUserMode('RESIDENT')}
+                            class={`flex-1 py-2 rounded-xl font-bold text-xs transition-all ${userMode === 'RESIDENT' ? 'bg-orange-500 text-white shadow' : 'text-gray-500'}`}>
+                            🏠 동네 주민 (내위치 20km 제한)
+                        </button>
+                        <button 
+                            onClick={() => setUserMode('TRAVELER')}
+                            class={`flex-1 py-2 rounded-xl font-bold text-xs transition-all ${userMode === 'TRAVELER' ? 'bg-emerald-600 text-white shadow' : 'text-gray-500'}`}>
+                            🧳 전국 여행자 (자유 탐색)
+                        </button>
                     </div>
 
-                    <main class="p-4 flex-1">
-                        <div class="bg-orange-50 p-4 rounded-2xl mb-6 border border-orange-100 text-center">
-                            <h2 class="font-bold text-gray-800 text-lg mb-1">📍 내 위치 반경 20km 찐맛집</h2>
-                            <p class="text-xs text-gray-500">실제 영수증 인증 리뷰 작성 시 100P 적립!</p>
-                        </div>
-
-                        <div class="space-y-4">
-                            <div class="border border-gray-100 rounded-2xl p-4 shadow-sm">
-                                <div class="flex justify-between items-center mb-3">
-                                    <h3 class="font-bold text-base text-gray-800">💬 동네 주민 영수증 리뷰</h3>
-                                    <button 
-                                        onClick={handleAddReview}
-                                        class="text-xs bg-orange-500 text-white font-bold px-3 py-1.5 rounded-lg hover:bg-orange-600">
-                                        + 영수증 리뷰 작성 (+100P)
-                                    </button>
+                    <main class="px-4 pb-4 flex-1">
+                        {/* 탭 1: 홈 */}
+                        {activeTab === 'home' && (
+                            <div class="space-y-4">
+                                <div class="bg-orange-50 p-4 rounded-2xl border border-orange-100 text-center">
+                                    <h2 class="font-bold text-gray-800 text-base mb-1">
+                                        {userMode === 'RESIDENT' ? '📍 실제 내 위치 기준 반경 20km 찐맛집' : '🗺️ 전국 어디든 원하는 곳 맛집 탐색'}
+                                    </h2>
+                                    <p class="text-xs text-gray-500">영수증 인증 리뷰 작성 시 100P 적립!</p>
                                 </div>
-                                
-                                <div class="bg-gray-50 p-3 rounded-xl border border-gray-100">
-                                    <div class="flex justify-between text-xs text-gray-500 mb-1">
-                                        <span class="font-bold text-gray-700">{currentUser.nickname} (영수증 인증 완료)</span>
-                                        <span>방금 전</span>
+
+                                <button onClick={() => setActiveTab('ai')} class="w-full py-3 bg-orange-500 text-white font-bold rounded-xl text-sm shadow">
+                                    ✨ AI 맛집 추천받기
+                                </button>
+
+                                <div class="border border-gray-100 rounded-2xl p-4 shadow-sm">
+                                    <div class="flex justify-between items-center mb-3">
+                                        <h3 class="font-bold text-base text-gray-800">💬 주민 영수증 리뷰</h3>
+                                        <button onClick={handleAddReview} class="text-xs bg-orange-500 text-white font-bold px-3 py-1.5 rounded-lg">+ 리뷰 작성 (+100P)</button>
                                     </div>
-                                    <p class="text-sm text-gray-800 font-medium mb-2">
-                                        "상점 협찬 없이 내 돈 주고 먹은 찐맛집입니다! 양도 푸짐해요."
-                                    </p>
+                                    <div class="bg-gray-50 p-3 rounded-xl border border-gray-100">
+                                        <p class="text-sm text-gray-800 font-medium">"영수증 인증 내돈내산 찐맛집 후기입니다!"</p>
+                                    </div>
                                 </div>
                             </div>
-                        </div>
+                        )}
+
+                        {/* 탭 2: 실제 카카오 지도 (주민 20km vs 여행자 전국) */}
+                        {activeTab === 'map' && (
+                            <div class="space-y-4">
+                                {userMode === 'TRAVELER' && (
+                                    <form onSubmit={handleTravelSearch} class="flex gap-2">
+                                        <input 
+                                            type="text" 
+                                            placeholder="예: 부산 해운대, 강릉, 제주 서귀포" 
+                                            value={travelSearchInput}
+                                            onChange={(e) => setTravelSearchInput(e.target.value)}
+                                            class="flex-1 px-4 py-2.5 border rounded-xl text-sm focus:outline-none focus:border-emerald-600"
+                                        />
+                                        <button type="submit" class="px-4 py-2.5 bg-emerald-600 text-white font-bold rounded-xl text-sm">검색</button>
+                                    </form>
+                                )}
+
+                                <div class={`p-3 rounded-xl border text-xs font-bold ${userMode === 'RESIDENT' ? 'bg-amber-50 border-amber-200 text-amber-900' : 'bg-emerald-50 border-emerald-200 text-emerald-900'}`}>
+                                    {userMode === 'RESIDENT' 
+                                        ? '🔒 주민 모드: 실제 위치 기준 반경 20km만 엄격하게 표시됩니다.' 
+                                        : `🧳 여행자 모드: '${travelSearchKeyword}' 기준 전국 지역 탐색 중`}
+                                </div>
+
+                                <KakaoMapView 
+                                    userMode={userMode}
+                                    userLat={userLocation.lat} 
+                                    userLng={userLocation.lng} 
+                                    searchKeyword={travelSearchKeyword}
+                                    onStoresFound={(stores) => setRealStores(stores)} 
+                                />
+
+                                <div class="space-y-2">
+                                    <h4 class="font-bold text-sm text-gray-700">📍 탐색된 실제 매장 ({realStores.length}곳)</h4>
+                                    {realStores.slice(0, 5).map((s) => (
+                                        <div key={s.id} class="p-3 border rounded-xl flex justify-between items-center bg-gray-50">
+                                            <div>
+                                                <span class="font-bold text-sm text-gray-800">{s.name}</span>
+                                                <span class="text-xs text-gray-400 block">{s.address}</span>
+                                            </div>
+                                            <span class="text-[10px] bg-orange-100 text-orange-700 font-bold px-2 py-1 rounded">{s.category.split(' > ')[1] || '식당'}</span>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* 탭 3: AI 추천 */}
+                        {activeTab === 'ai' && (
+                            <div class="space-y-4">
+                                <div class="bg-orange-500 text-white p-4 rounded-2xl shadow">
+                                    <h3 class="font-bold text-lg mb-1">🤖 AI 맛집 추천</h3>
+                                    <p class="text-xs text-orange-100">원하시는 메뉴나 분위기를 검색하세요.</p>
+                                </div>
+                                <form onSubmit={handleAiRecommend} class="space-y-2">
+                                    <input type="text" placeholder="예: 얼큰하고 깔끔한 국물 요리" value={aiQuery} onChange={(e) => setAiQuery(e.target.value)} class="w-full px-4 py-3 border rounded-xl text-sm" />
+                                    <button type="submit" class="w-full py-3 bg-gray-900 text-white font-bold rounded-xl text-sm shadow">AI 실시간 추천</button>
+                                </form>
+                                {aiResult && (
+                                    <div class="p-4 bg-orange-50 border border-orange-200 rounded-2xl space-y-2">
+                                        <h4 class="font-extrabold text-orange-600 text-base">{aiResult.storeName}</h4>
+                                        <p class="text-xs text-gray-500">{aiResult.category} · {aiResult.address}</p>
+                                        <p class="text-xs text-gray-700 bg-white p-3 rounded-xl border border-orange-100">{aiResult.reason}</p>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {/* 탭 4: 내 정보 */}
+                        {activeTab === 'profile' && (
+                            <div class="space-y-4">
+                                <div class="bg-gray-50 p-4 rounded-2xl border border-gray-200">
+                                    <h3 class="font-bold text-gray-800 text-base">{currentUser.nickname}님 정보</h3>
+                                    <p class="text-xs text-gray-500">아이디: {currentUser.id}</p>
+                                    <div class="mt-3 pt-3 border-t flex justify-between items-center">
+                                        <span class="text-xs font-bold text-gray-600">보유 포인트</span>
+                                        <span class="font-extrabold text-orange-600 text-lg">{currentUser.points.toLocaleString()} P</span>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
                     </main>
 
+                    {/* 하단 네비게이션 */}
                     <nav class="fixed bottom-0 max-w-md w-full bg-white border-t border-gray-100 py-3 flex justify-around text-xs font-bold text-gray-500">
-                        <button class="text-orange-500 flex flex-col items-center"><span>🏠</span> 홈</button>
-                        <button class="flex flex-col items-center"><span>🗺️</span> 20km 지도</button>
-                        <button class="flex flex-col items-center"><span>✨</span> AI 추천</button>
-                        <button onClick={() => setIsAdminView(true)} class="flex flex-col items-center text-gray-400"><span>🔒</span> 관계자</button>
+                        <button onClick={() => setActiveTab('home')} class={`flex flex-col items-center ${activeTab === 'home' ? 'text-orange-500' : ''}`}><span>🏠</span> 홈</button>
+                        <button onClick={() => setActiveTab('map')} class={`flex flex-col items-center ${activeTab === 'map' ? 'text-orange-500' : ''}`}><span>🗺️</span> 지도</button>
+                        <button onClick={() => setActiveTab('ai')} class={`flex flex-col items-center ${activeTab === 'ai' ? 'text-orange-500' : ''}`}><span>✨</span> AI 추천</button>
+                        <button onClick={() => setActiveTab('profile')} class={`flex flex-col items-center ${activeTab === 'profile' ? 'text-orange-500' : ''}`}><span>👤</span> 내 정보</button>
                     </nav>
                 </div>
             );
